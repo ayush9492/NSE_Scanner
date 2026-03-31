@@ -346,13 +346,13 @@ from fastapi.responses import FileResponse
 @app.get("/app", response_class=FileResponse)
 def serve_frontend():
     """Serve the frontend UI."""
-    # Check common locations for the frontend file
-    for path in ["../frontend/index.html", "static/index.html", "index.html"]:
+    for path in ["index.html", "static/index.html", "../frontend/index.html"]:
         if os.path.exists(path):
             return FileResponse(path)
-    return FileResponse("../frontend/index.html")
+    return {"error": "Frontend not found"}
 
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
