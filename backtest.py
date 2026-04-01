@@ -257,38 +257,122 @@ def generate_signals(idx_data, stocks, stocks_w):
 
 # ── SIMULATE 1:2 RR ──────────────────────────────────────────────────────────
 
+MAX_POSITIONS = 5      # Max 5 concurrent open positions
+POSITION_SIZE_PCT = 20 # Each position = 20% of capital (5 x 20% = 100%)
+
+
 def simulate_trades(signals, stocks, stop_pct, target_pct):
+    """
+    Realistic simulator:
+    - 1 position per stock: if holding, skip all new signals for that stock
+    - Once target/stop is hit, stock is free to be entered again on next signal
+    - Max 5 concurrent positions
+    """
     trades = []
-    for sig in signals:
-        sym, df = sig['symbol'], stocks.get(sig['symbol'])
-        if df is None:
-            continue
-        entry_date, entry_price = sig['date'], sig['entry_price']
-        target, stop = entry_price * (1 + target_pct/100), entry_price * (1 - stop_pct/100)
+    open_positions = []
+    skipped_holding = 0
+    skipped_full = 0
 
-        future = df[df.index > entry_date]
-        if len(future) < 2:
-            continue
+    sorted_sigs = sorted(signals, key=lambda x: x['date'])
+    all_dates = sorted(set(d for df in stocks.values() for d in df.index.tolist()))
 
-        exit_date, exit_price, reason, days = future.index[-1], float(future['Close'].iloc[-1]), 'open', len(future)
+    signal_idx = 0
+    equity = INITIAL_CAPITAL
+    equity_curve = [{'date': all_dates[0], 'equity': equity}]
 
-        for j in range(len(future)):
-            lo, hi = float(future['Low'].iloc[j]), float(future['High'].iloc[j])
-            if lo <= stop:
-                exit_price, exit_date, reason, days = stop, future.index[j], 'STOP', j+1
-                break
-            if hi >= target:
-                exit_price, exit_date, reason, days = target, future.index[j], 'TARGET', j+1
-                break
+    for date in all_dates:
+        # ── CHECK EXITS ──
+        closed = []
+        for pos in open_positions:
+            df = stocks.get(pos['symbol'])
+            if df is None or date not in df.index:
+                continue
 
-        trades.append({
-            'symbol': sym.replace('.NS',''), 'entry_date': entry_date.strftime('%Y-%m-%d'),
-            'exit_date': exit_date.strftime('%Y-%m-%d'), 'entry': round(entry_price,2),
-            'target': round(target,2), 'stop': round(stop,2), 'exit': round(exit_price,2),
-            'pnl_pct': round((exit_price-entry_price)/entry_price*100, 2),
-            'days': days, 'result': reason,
-        })
-    return trades
+            lo = float(df.loc[date, 'Low'])
+            hi = float(df.loc[date, 'High'])
+            pos_size = INITIAL_CAPITAL * POSITION_SIZE_PCT / 100
+
+            if lo <= pos['stop']:
+                equity += pos_size * (-stop_pct / 100)
+                pos.update({'exit_date': date, 'exit_price': pos['stop'],
+                            'pnl_pct': round(-stop_pct, 2), 'result': 'STOP',
+                            'days': len(df[(df.index > pos['entry_date']) & (df.index <= date)])})
+                closed.append(pos)
+            elif hi >= pos['target']:
+                equity += pos_size * (target_pct / 100)
+                pos.update({'exit_date': date, 'exit_price': pos['target'],
+                            'pnl_pct': round(target_pct, 2), 'result': 'TARGET',
+                            'days': len(df[(df.index > pos['entry_date']) & (df.index <= date)])})
+                closed.append(pos)
+
+        for pos in closed:
+            open_positions.remove(pos)
+            trades.append({
+                'symbol': pos['symbol'].replace('.NS', ''),
+                'entry_date': pos['entry_date'].strftime('%Y-%m-%d'),
+                'exit_date': pos['exit_date'].strftime('%Y-%m-%d'),
+                'entry': round(pos['entry_price'], 2),
+                'target': round(pos['target'], 2),
+                'stop': round(pos['stop'], 2),
+                'exit': round(pos['exit_price'], 2),
+                'pnl_pct': pos['pnl_pct'],
+                'days': pos['days'],
+                'result': pos['result'],
+            })
+
+        # ── CHECK NEW ENTRIES ──
+        while signal_idx < len(sorted_sigs) and sorted_sigs[signal_idx]['date'] <= date:
+            sig = sorted_sigs[signal_idx]
+            signal_idx += 1
+            if sig['date'] != date:
+                continue
+
+            sym = sig['symbol']
+
+            # Already holding this stock? Skip until position closes
+            if any(p['symbol'] == sym for p in open_positions):
+                skipped_holding += 1
+                continue
+
+            # All 5 slots full?
+            if len(open_positions) >= MAX_POSITIONS:
+                skipped_full += 1
+                continue
+
+            # ENTER — 1 position in this stock
+            open_positions.append({
+                'symbol': sym,
+                'entry_date': date,
+                'entry_price': sig['entry_price'],
+                'target': sig['entry_price'] * (1 + target_pct / 100),
+                'stop': sig['entry_price'] * (1 - stop_pct / 100),
+            })
+
+        equity_curve.append({'date': date, 'equity': equity})
+
+    # Close remaining open positions at last price
+    for pos in open_positions:
+        df = stocks.get(pos['symbol'])
+        if df is not None and len(df) > 0:
+            ep = float(df['Close'].iloc[-1])
+            ed = df.index[-1]
+            pnl = ((ep - pos['entry_price']) / pos['entry_price']) * 100
+            equity += (INITIAL_CAPITAL * POSITION_SIZE_PCT / 100) * (pnl / 100)
+            trades.append({
+                'symbol': pos['symbol'].replace('.NS', ''),
+                'entry_date': pos['entry_date'].strftime('%Y-%m-%d'),
+                'exit_date': ed.strftime('%Y-%m-%d'),
+                'entry': round(pos['entry_price'], 2),
+                'target': round(pos['target'], 2),
+                'stop': round(pos['stop'], 2),
+                'exit': round(ep, 2),
+                'pnl_pct': round(pnl, 2),
+                'days': len(df[(df.index > pos['entry_date']) & (df.index <= ed)]),
+                'result': 'open',
+            })
+
+    print(f"    Already holding: {skipped_holding} skipped | Slots full: {skipped_full} skipped | Trades taken: {len(trades)}")
+    return trades, equity_curve
 
 
 # ── STATS ─────────────────────────────────────────────────────────────────────
@@ -321,24 +405,25 @@ def print_results(s):
         print(f"  {s['label']}: No trades"); return
     v = "✅ EDGE EXISTS" if s['expectancy'] > 0 else "❌ NO EDGE"
     print(f"""
-  ┌────────────────────────────────────────────────┐
-  │  {s['label']:<46s}│
-  ├────────────────────────────────────────────────┤
-  │  Trades: {s['total']:>4}  │ Targets: {s['targets']:>4}  │ Stops: {s['stops']:>4}  │
-  │  Win Rate:     {s['win_rate']:>6.1f}%                      │
-  │  Avg Return:  {s['avg_ret']:>+7.2f}%                       │
-  │  Total Return:{s['total_ret']:>+8.2f}%                      │
-  │  Avg Winner:  {s['avg_win']:>+7.2f}%  │ Avg Loser: {s['avg_loss']:>+7.2f}% │
-  │  Profit Factor: {s['pf']:>5.2f}x                        │
-  │  Expectancy:  {s['expectancy']:>+7.2f}%/trade                  │
-  │  Avg Holding:  {s['avg_days']:>5.1f} days                    │
-  │  Verdict: {v:<38s}│
-  └────────────────────────────────────────────────┘""")
+  ┌────────────────────────────────────────────────────┐
+  │  {s['label']:<50s}│
+  ├────────────────────────────────────────────────────┤
+  │  Trades: {s['total']:>4}  │ Targets: {s['targets']:>4}  │ Stops: {s['stops']:>4}    │
+  │  Win Rate:     {s['win_rate']:>6.1f}%                          │
+  │  Avg Return:  {s['avg_ret']:>+7.2f}%                           │
+  │  Total Return:{s['total_ret']:>+8.2f}%                          │
+  │  Avg Winner:  {s['avg_win']:>+7.2f}%  │ Avg Loser: {s['avg_loss']:>+7.2f}%     │
+  │  Profit Factor: {s['pf']:>5.2f}x                            │
+  │  Expectancy:  {s['expectancy']:>+7.2f}%/trade                      │
+  │  Avg Holding:  {s['avg_days']:>5.1f} days                        │
+  │  Final Equity: ₹{s['final_equity']:>12,.0f}  ({s['portfolio_ret']:>+.1f}%)     │
+  │  Verdict: {v:<42s}│
+  └────────────────────────────────────────────────────┘""")
 
 
 # ── CHARTS ────────────────────────────────────────────────────────────────────
 
-def plot_results(all_stats, all_trades):
+def plot_results(all_stats, all_trades, all_curves):
     os.makedirs("backtest_output", exist_ok=True)
     valid = [s for s in all_stats if s['total'] > 0]
     if not valid:
@@ -382,23 +467,24 @@ def plot_results(all_stats, all_trades):
     plt.close()
     print(f"  📊 Saved: backtest_output/backtest_1to2.png")
 
-    # Equity curve
+    # Equity curve from real portfolio tracking
     best_i = max(range(len(valid)), key=lambda i: valid[i]['expectancy'])
-    bt = all_trades[best_i]
-    if bt:
+    eq_data = all_curves[best_i]
+    if eq_data and len(eq_data) > 10:
         fig, ax = plt.subplots(figsize=(14, 5))
         fig.patch.set_facecolor('#0a0e17'); ax.set_facecolor('#111827')
-        eq = INITIAL_CAPITAL
-        curve = [eq]
-        for t in bt:
-            eq += (eq * 0.05) * (t['pnl_pct']/100)
-            curve.append(eq)
-        ax.plot(curve, color='#22c55e', lw=1.5)
+        dates = [e['date'] for e in eq_data]
+        curve = [e['equity'] for e in eq_data]
+        ax.plot(dates, curve, color='#22c55e', lw=1.5)
+        ax.fill_between(dates, INITIAL_CAPITAL, curve,
+                        where=[e >= INITIAL_CAPITAL for e in curve], alpha=0.12, color='#22c55e')
+        ax.fill_between(dates, INITIAL_CAPITAL, curve,
+                        where=[e < INITIAL_CAPITAL for e in curve], alpha=0.12, color='#ef4444')
         ax.axhline(INITIAL_CAPITAL, color='#f59e0b', ls='--', alpha=0.4)
         ret = (curve[-1]-INITIAL_CAPITAL)/INITIAL_CAPITAL*100
-        ax.set_title(f"Equity Curve — {valid[best_i]['label']} | ₹{curve[-1]:,.0f} ({ret:+.1f}%)",
-                     color='#e2e8f0', fontsize=13, fontweight='bold')
-        ax.set_xlabel('Trade #', color='#94a3b8'); ax.set_ylabel('₹', color='#94a3b8')
+        ax.set_title(f"Portfolio Equity — {valid[best_i]['label']} | {MAX_POSITIONS} pos max, 1 per stock | ₹{curve[-1]:,.0f} ({ret:+.1f}%)",
+                     color='#e2e8f0', fontsize=12, fontweight='bold')
+        ax.set_xlabel('Date', color='#94a3b8'); ax.set_ylabel('₹', color='#94a3b8')
         ax.tick_params(colors='#94a3b8')
         for sp in ax.spines.values(): sp.set_color('#1e293b')
         plt.tight_layout()
@@ -414,6 +500,7 @@ def main():
     print(f"  BACKTEST — RS New High + Buy Signal | 1:2 Risk-Reward")
     print(f"{'═'*70}")
     print(f"  ₹{INITIAL_CAPITAL:,.0f} capital | {BACKTEST_YEARS}yr | {len(STOCK_LIST)} stocks")
+    print(f"  Max {MAX_POSITIONS} positions | 1 position per stock | {POSITION_SIZE_PCT}% per position")
 
     idx, idx_w, stocks, stocks_w = download_data()
     signals, diag = generate_signals(idx, stocks, stocks_w)
@@ -424,13 +511,18 @@ def main():
         print(f"     or reduce RSI threshold (e.g., ≥ 50).\n")
         return
 
-    print(f"\n{'═'*70}\n  SIMULATING 1:2 RISK-REWARD\n{'═'*70}")
-    all_stats, all_trades = [], []
+    print(f"\n{'═'*70}\n  SIMULATING 1:2 RISK-REWARD (max {MAX_POSITIONS} positions, 1 per stock)\n{'═'*70}")
+    all_stats, all_trades, all_curves = [], [], []
     for sl, tgt in RR_PAIRS:
-        trades = simulate_trades(signals, stocks, sl, tgt)
+        print(f"\n  Testing SL {sl}% → Target {tgt}%:")
+        trades, eq_curve = simulate_trades(signals, stocks, sl, tgt)
+        final_eq = eq_curve[-1]['equity'] if eq_curve else INITIAL_CAPITAL
         stats = compute_stats(trades, f"SL {sl}% → Target {tgt}%")
+        stats['final_equity'] = round(final_eq)
+        stats['portfolio_ret'] = round((final_eq - INITIAL_CAPITAL) / INITIAL_CAPITAL * 100, 1)
         all_stats.append(stats)
         all_trades.append(trades)
+        all_curves.append(eq_curve)
         print_results(stats)
 
     # Best
@@ -447,7 +539,7 @@ def main():
 
     # Save
     print(f"\n  📊 GENERATING CHARTS...")
-    plot_results(all_stats, all_trades)
+    plot_results(all_stats, all_trades, all_curves)
     os.makedirs("backtest_output", exist_ok=True)
     for i,(sl,tgt) in enumerate(RR_PAIRS):
         if all_trades[i]:
