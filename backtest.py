@@ -469,28 +469,57 @@ def plot_results(all_stats, all_trades, all_curves):
 
     # Equity curve from real portfolio tracking
     best_i = max(range(len(valid)), key=lambda i: valid[i]['expectancy'])
-    eq_data = all_curves[best_i]
-    if eq_data and len(eq_data) > 10:
+
+    colors = ['#f59e0b', '#3b82f6', '#a855f7', '#22c55e']
+
+    # ── Individual equity curve for EACH strategy ──
+    for i, (stats, eq_data) in enumerate(zip(valid, all_curves)):
+        if not eq_data or len(eq_data) < 10:
+            continue
         fig, ax = plt.subplots(figsize=(14, 5))
         fig.patch.set_facecolor('#0a0e17'); ax.set_facecolor('#111827')
         dates = [e['date'] for e in eq_data]
         curve = [e['equity'] for e in eq_data]
-        ax.plot(dates, curve, color='#22c55e', lw=1.5)
+        ax.plot(dates, curve, color=colors[i], lw=1.5)
         ax.fill_between(dates, INITIAL_CAPITAL, curve,
-                        where=[e >= INITIAL_CAPITAL for e in curve], alpha=0.12, color='#22c55e')
+                        where=[e >= INITIAL_CAPITAL for e in curve], alpha=0.12, color=colors[i])
         ax.fill_between(dates, INITIAL_CAPITAL, curve,
                         where=[e < INITIAL_CAPITAL for e in curve], alpha=0.12, color='#ef4444')
         ax.axhline(INITIAL_CAPITAL, color='#f59e0b', ls='--', alpha=0.4)
         ret = (curve[-1]-INITIAL_CAPITAL)/INITIAL_CAPITAL*100
-        ax.set_title(f"Portfolio Equity — {valid[best_i]['label']} | {MAX_POSITIONS} pos max, 1 per stock | ₹{curve[-1]:,.0f} ({ret:+.1f}%)",
+        ax.set_title(f"Portfolio Equity — {stats['label']} | {MAX_POSITIONS} pos max, 1 per stock | ₹{curve[-1]:,.0f} ({ret:+.1f}%)",
                      color='#e2e8f0', fontsize=12, fontweight='bold')
         ax.set_xlabel('Date', color='#94a3b8'); ax.set_ylabel('₹', color='#94a3b8')
         ax.tick_params(colors='#94a3b8')
         for sp in ax.spines.values(): sp.set_color('#1e293b')
         plt.tight_layout()
-        plt.savefig('backtest_output/equity_1to2.png', dpi=150, facecolor='#0a0e17', bbox_inches='tight')
+        # Filename from label: "SL 3% → Target 6%" -> "equity_SL3_TGT6.png"
+        fname = stats['label'].replace('SL ','SL').replace('% → Target ','_TGT').replace('%','')
+        plt.savefig(f'backtest_output/equity_{fname}.png', dpi=150, facecolor='#0a0e17', bbox_inches='tight')
         plt.close()
-        print(f"  📈 Saved: backtest_output/equity_1to2.png")
+        print(f"  📈 Saved: backtest_output/equity_{fname}.png")
+
+    # ── Combined overlay of all 4 strategies ──
+    fig, ax = plt.subplots(figsize=(16, 6))
+    fig.patch.set_facecolor('#0a0e17'); ax.set_facecolor('#111827')
+    for i, (stats, eq_data) in enumerate(zip(valid, all_curves)):
+        if not eq_data or len(eq_data) < 10:
+            continue
+        dates = [e['date'] for e in eq_data]
+        curve = [e['equity'] for e in eq_data]
+        ret = (curve[-1]-INITIAL_CAPITAL)/INITIAL_CAPITAL*100
+        ax.plot(dates, curve, color=colors[i], lw=1.5, label=f"{stats['label']} → ₹{curve[-1]:,.0f} ({ret:+.1f}%)")
+    ax.axhline(INITIAL_CAPITAL, color='#64748b', ls='--', alpha=0.4)
+    ax.set_title(f"All Strategies Compared | {MAX_POSITIONS} pos max, 1 per stock, ₹{INITIAL_CAPITAL:,.0f} start",
+                 color='#e2e8f0', fontsize=13, fontweight='bold')
+    ax.set_xlabel('Date', color='#94a3b8'); ax.set_ylabel('₹', color='#94a3b8')
+    ax.tick_params(colors='#94a3b8')
+    ax.legend(facecolor='#111827', edgecolor='#1e293b', labelcolor='#e2e8f0', fontsize=10, loc='upper left')
+    for sp in ax.spines.values(): sp.set_color('#1e293b')
+    plt.tight_layout()
+    plt.savefig('backtest_output/equity_all_combined.png', dpi=150, facecolor='#0a0e17', bbox_inches='tight')
+    plt.close()
+    print(f"  📈 Saved: backtest_output/equity_all_combined.png")
 
 
 # ── MAIN ──────────────────────────────────────────────────────────────────────
